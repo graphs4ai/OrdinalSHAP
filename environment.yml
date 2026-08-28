@@ -1,0 +1,23 @@
+name: ordinalshap
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pandas
+  - scipy
+  - pytorch
+  - pip:
+      - -e .
+      - openai
+      - matplotlib
+      - numpy
+      - click
+      - tqdm
+      - scikit-learn
+      - rank-bm25
+      - sentence-transformers
+      - google-genai
+      - datasets

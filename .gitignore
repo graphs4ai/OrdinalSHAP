@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+build/
+dist/
+
+# Environments / secrets
+.env
+.venv/
+venv/
+
+# Response and embedding caches (regenerable via compute_shapley.py / e1.py / e5.py)
+paper_experiments/results/response_cache/
+paper_experiments/results/e3_response_cache/
+paper_experiments/response_cache/
+paper_experiments/e3_response_cache/
+paper_experiments/google_embedding_cache/
+google_embedding_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
