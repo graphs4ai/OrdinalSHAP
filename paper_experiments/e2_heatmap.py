@@ -14,7 +14,7 @@ MODELS = ["deepseek", "gemma", "mistral"]
 DATASETS = ["sst-5", "yelp-20", "yelp-50"]
 MASKER = "delete"
 
-ALL_PAYOFFS = ["ordinal", "tf-idf", "minilm", "bge", "gte", "e5", "google-embeddings-2", "bm25"]
+ALL_PAYOFFS = ["ordinal-directional", "ordinal-preservation", "tf-idf", "minilm", "bm25", "google-embeddings-2", "bge", "gte", "e5"]
 
 
 def spearman(x, y):
