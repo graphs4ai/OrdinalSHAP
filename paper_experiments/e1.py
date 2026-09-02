@@ -7,7 +7,7 @@ import pandas as pd
 from scipy.stats import kendalltau, spearmanr
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sentence_transformers import SentenceTransformer
-from rank_bm25 import BM25Okapi
+from rank_bm25 import BM25L
 from google import genai
 from google.genai import types
 import torch
@@ -60,13 +60,22 @@ def _bm25_tokenize(text):
 
 def sim_bm25(texts):
   tokenized = [_bm25_tokenize(t) for t in texts]
-  bm25 = BM25Okapi(tokenized)
+  bm25 = BM25L(tokenized)
   k = len(texts)
   S = np.zeros((k, k))
   for i in range(k):
     S[i, :] = bm25.get_scores(tokenized[i])
   S = (S + S.T) / 2.0
   return S
+
+def sim_ordinal_distance(texts):
+  k = len(texts)
+  ranks = np.arange(k, dtype=float)
+  span = ranks.max() - ranks.min()
+  if span == 0:
+    return np.ones((k, k))
+  D = np.abs(ranks[:, None] - ranks[None, :])
+  return 1.0 - D / span
 
 def _cache_key(text):
   return hashlib.sha256(text.encode("utf-8")).hexdigest()[:24]
@@ -116,9 +125,9 @@ def pair_arrays(S):
     s.append(S[i, j])
   return np.asarray(d, float), np.asarray(s, float)
 
-def violation_rate(S, tol=1e-9):
+def violation_rate(S, tol=1e-9, tie_weight=0.5):
   k = S.shape[0]
-  violations = 0
+  score = 0.0
   total = 0
   for a, b, c in itertools.permutations(range(k), 3):
     if abs(a - b) >= abs(a - c):
@@ -126,19 +135,24 @@ def violation_rate(S, tol=1e-9):
     total += 1
     diff = S[a, b] - S[a, c]
     if diff < -tol:
-      violations += 1
-  return violations / total
+      score += 1.0
+    elif abs(diff) <= tol:
+      score += tie_weight
+  return score / total
 
-def evaluate(S):
+
+def evaluate(S, tol=1e-9):
   d, s = pair_arrays(S)
-  rho = spearmanr(d, s)[0]
-  tau = kendalltau(d, s).statistic
-  violation = violation_rate(S)
+  is_const = bool(s.max() - s.min() < tol)
   return {
     "n_pairs": len(d),
-    "spearman": rho,
-    "kendall": tau,
-    "violation_rate": violation,
+    "spearman": spearmanr(d, s)[0],
+    "kendall": kendalltau(d, s).statistic,
+    "violation_rate": violation_rate(S),
+    "offdiag_min": float(s.min()),
+    "offdiag_max": float(s.max()),
+    "degenerate": is_const,
+    "constant_value": float(s[0]) if is_const else None,
   }
 
 def main():
@@ -165,6 +179,14 @@ def main():
       **evaluate(sim_bm25(texts)),
     })
 
+  for scale_name, fmt_name, texts in combos:
+    rows.append({
+      "scale": scale_name,
+      "format": fmt_name,
+      "encoder": "ordinal-distance",
+      **evaluate(sim_ordinal_distance(texts)),
+    })
+  
   for enc_name, (model_id, prefix) in EMBEDDERS.items():
     model = SentenceTransformer(model_id, device=DEVICE)
     for scale_name, fmt_name, texts in combos:
