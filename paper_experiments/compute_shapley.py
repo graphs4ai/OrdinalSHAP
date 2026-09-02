@@ -7,15 +7,7 @@ import click
 from tqdm import tqdm
 import pandas as pd
 
-from ordinalshap.payoffs import (
-  OrdinalPayoff, 
-  TFIDFPayoff, 
-  BM25Payoff,
-  EmbeddingPayoff, 
-  SentenceEmbedder,
-  GoogleEmbeddingPayoff, 
-  GoogleEmbedder
-)
+from ordinalshap.payoffs import *
 from ordinalshap.coalition_evaluator import CoalitionEvaluator
 from ordinalshap.coalitions import PermutationSampler
 from ordinalshap.maskers import DeleteMasker, ReplacementMasker
@@ -39,7 +31,7 @@ MODEL_NAMES = {
 MODELS = list(MODEL_NAMES)
 
 MASKERS = ["delete", "replacement"]
-PAYOFFS = ["ordinal", "tf-idf", "minilm", "bm25", "google-embeddings-2", "bge", "gte", "e5"]
+PAYOFFS = ["ordinal-directional", "ordinal-preservation", "tf-idf", "minilm", "bm25", "google-embeddings-2", "bge", "gte", "e5"]
 DATASETS = ["sst-5", "yelp-20", "yelp-50"]
 
 SST5_SYSTEM_PROMPT = """
@@ -87,7 +79,7 @@ YELP_ORDINAL_MAPPING = {
 }
 
 DATASET_CONFIGS = {
-  "sst5": {"system_prompt": SST5_SYSTEM_PROMPT, "ordinal_mapping": SST5_ORDINAL_MAPPING},
+  "sst": {"system_prompt": SST5_SYSTEM_PROMPT, "ordinal_mapping": SST5_ORDINAL_MAPPING},
   "yelp": {"system_prompt": YELP_SYSTEM_PROMPT, "ordinal_mapping": YELP_ORDINAL_MAPPING},
 }
 
@@ -147,7 +139,11 @@ def build_payoff(payoff_name, ordinal_mapping):
   if payoff_name == "google-embeddings-2":
     client = genai.Client(api_key=_require_env("GOOGLE_API_KEY"))
     return GoogleEmbeddingPayoff(GoogleEmbedder(client), cache_dir=GOOGLE_EMBEDDING_CACHE_DIR)
-  return OrdinalPayoff(ordinal_mapping)
+  if payoff_name == "ordinal-directional":
+    return OrdinalDirectionalPayoff(ordinal_mapping)
+  if payoff_name == "ordinal-preservation":
+    return OrdinalPreservationPayoff(ordinal_mapping)
+  raise ValueError(f"unknown payoff: {payoff_name}")
 
 
 async def run_dataset(model_name, masker_name, payoff_name, n_samples, dataset_name, out_csv):
