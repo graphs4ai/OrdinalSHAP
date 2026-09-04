@@ -72,7 +72,7 @@ import asyncio
 import os
 
 from ordinalshap import (
-  InstanceModel, WordSplitter, DeleteMasker, OrdinalPayoff,
+  InstanceModel, WordSplitter, DeleteMasker, OrdinalDirectionalPayoff,
   CoalitionEvaluator, PermutationSampler, ShapleyExplainer, ShapleyVisualization,
 )
 
@@ -86,7 +86,7 @@ async def main():
     model=model, 
     splitter=WordSplitter(), 
     masker=DeleteMasker(),
-    payoff=OrdinalPayoff({"negative": 0, "neutral": 1, "positive": 2}),
+    payoff=OrdinalDirectionalPayoff({"negative": 0, "neutral": 1, "positive": 2}),
     system_prompt="Classify sentiment as negative, neutral, or positive. Output one word only.",
     text="This movie was absolutely terrible",
   )
