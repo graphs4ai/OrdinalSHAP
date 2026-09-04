@@ -5,7 +5,7 @@ from ordinalshap import (
     InstanceModel,
     WordSplitter,
     DeleteMasker,
-    OrdinalPayoff,
+    OrdinalDirectionalPayoff,
     CoalitionEvaluator,
     PermutationSampler,
     ShapleyExplainer,
@@ -48,7 +48,7 @@ async def main():
 
   splitter = WordSplitter()
   masker = DeleteMasker()
-  payoff = OrdinalPayoff(ORDINAL_MAPPING)
+  payoff = OrdinalDirectionalPayoff(ORDINAL_MAPPING)
   sampler = PermutationSampler(n_samples=10)
 
   evaluator = CoalitionEvaluator(
