@@ -152,5 +152,3 @@ python3 run_all.py
 ```
 
 Note: this reruns all LLM API calls from scratch and can be costly. Pre-computed Shapley attributions (`paper_experiments/results/results.csv`) are provided so that the downstream analyses (E1-E5, without `compute_shapley.py`) can be reproduced offline, without any API access.
-
-BM25 similarities use the BM25L variant. The Okapi formulation assigns a negative inverse document frequency to terms occurring in every document of the fitting corpus, which inverts the intended ordering when the labels share a verbalization template; results obtained with `BM25Okapi` will therefore differ from those reported in the paper.
