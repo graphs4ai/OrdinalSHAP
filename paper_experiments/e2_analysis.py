@@ -9,7 +9,7 @@ RESULTS_DIR = "results"
 DEFAULT_RESULTS_CSV = "results/results.csv"
 
 MODELS = ["deepseek", "gemma", "mistral"]
-DATASETS = ["sst5-20", "yelp-20", "yelp-50"]
+DATASETS = ["sst-5", "yelp-20", "yelp-50"]
 MASKER = "delete"
 
 PAYOFF_COLUMN_MAP = {
