@@ -2,7 +2,7 @@ import subprocess
 
 MODELS = ["deepseek", "gemma", "mistral"]
 DATASETS = ["sst-5", "yelp-20", "yelp-50"]
-PAYOFFS = ["ordinal", "tf-idf", "minilm", "bm25", "google-embeddings-2", "bge", "gte", "e5"]
+PAYOFFS = ["ordinal-direction", "ordinal-preservation", "tf-idf", "minilm", "bm25", "google-embeddings-2", "bge", "gte", "e5"]
 
 
 def run(cmd):
@@ -40,7 +40,8 @@ run("python3 e3_aggregate.py")
 # Compute Shapley values (replacement masker, ordinal payoff only) for E4
 for model in MODELS:
   for dataset in DATASETS:
-    run(f"python3 compute_shapley.py --model_name {model} --masker_name replacement --payoff_name ordinal --dataset_name {dataset}")
+    for payoff in ["ordinal-direction", "ordinal-preservation"]
+    run(f"python3 compute_shapley.py --model_name {model} --masker_name replacement --payoff_name {payoff} --dataset_name {dataset}")
 
 # E4 — robustness across masking strategies
 for dataset in DATASETS:
