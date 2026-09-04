@@ -118,7 +118,7 @@ async def main():
   )
   # The same permutations are used for both payoffs, so the comparison is
   # paired and does not include variation from coalition sampling.
-  sampler = PermutationSampler(n_samples=10, seed=0)
+  sampler = PermutationSampler(n_samples=10, random_state=0)
 
   # Which tokens move the prediction along the scale?
   tokens, phi_dir = await explain(OrdinalDirectionalPayoff(MAPPING), model, sampler)
