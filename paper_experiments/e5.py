@@ -1,6 +1,5 @@
 import json
 import os
-
 import click
 import numpy as np
 import pandas as pd
@@ -8,6 +7,13 @@ import pandas as pd
 from ordinalshap.visualization import ShapleyVisualization
 
 CACHE_DIR = "response_cache"
+RESULTS_DIR = "results"
+
+DIRECTIONAL = "ordinal-directional"
+PRESERVATION = "ordinal-preservation"
+
+EMPTY_COALITION_RANK = 2
+
 
 def sign_disagreement(a, b):
   a = np.asarray(a, dtype=float)
@@ -28,24 +34,49 @@ def response_diversity(dataset, model, masker, sample_id, n_samples=10, sampler_
   return len(set(data.values()))
 
 
-def find_best_example(results_csv, model, dataset, masker, baseline_payoff, min_response_diversity=3, n_samples=10):
+def ratio_summary(phi_dir, phi_pres, tol=1e-9):
+  phi_dir = np.asarray(phi_dir, dtype=float)
+  phi_pres = np.asarray(phi_pres, dtype=float)
+  mask = np.abs(phi_dir) > tol
+  if mask.sum() == 0:
+    return np.nan, 0
+  ratios = phi_pres[mask] / phi_dir[mask]
+  distinct = len(np.unique(np.round(ratios, 6)))
+  return float(np.median(ratios)), distinct
 
+
+def collect_candidates(results_csv, model, dataset, masker, extra_payoff, min_response_diversity, n_samples):
   df = pd.read_csv(results_csv)
+  df = df.drop_duplicates(subset=["dataset", "model", "masker", "payoff", "sample_id", "feature"], keep="last")
   subset = df[(df["dataset"] == dataset) & (df["model"] == model) & (df["masker"] == masker)]
 
-  ordinal = subset[subset["payoff"] == "ordinal"]
-  baseline = subset[subset["payoff"] == baseline_payoff]
+  wanted = [DIRECTIONAL, PRESERVATION]
+  if extra_payoff:
+    wanted.append(extra_payoff)
 
-  if ordinal.empty or baseline.empty:
-    raise ValueError(f"No rows found for ordinal or {baseline_payoff!r} under model={model!r}, dataset={dataset!r}, masker={masker!r}.")
+  frames = {}
+  for payoff in wanted:
+    part = subset[subset["payoff"] == payoff]
+    if part.empty:
+      raise ValueError(f"Payoff {payoff!r} not found for {model}/{dataset}/{masker}. Available: {sorted(subset['payoff'].unique())}")
+    frames[payoff] = part
 
-  best = None
+  candidates = []
   n_skipped_degenerate = 0
   n_skipped_no_cache = 0
+  n_skipped_mismatch = 0
 
-  for sample_id, group_o in ordinal.groupby("sample_id"):
-    group_b = baseline[baseline["sample_id"] == sample_id]
-    if len(group_o) != len(group_b) or len(group_o) == 0:
+  for sample_id, g_dir in frames[DIRECTIONAL].groupby("sample_id"):
+    parts = {DIRECTIONAL: g_dir}
+    ok = True
+    for payoff in wanted[1:]:
+      g = frames[payoff][frames[payoff]["sample_id"] == sample_id]
+      if len(g) != len(g_dir) or len(g) == 0:
+        ok = False
+        break
+      parts[payoff] = g
+    if not ok:
+      n_skipped_mismatch += 1
       continue
 
     diversity = response_diversity(dataset, model, masker, sample_id, n_samples=n_samples)
@@ -56,28 +87,87 @@ def find_best_example(results_csv, model, dataset, masker, baseline_payoff, min_
       n_skipped_degenerate += 1
       continue
 
-    merged = group_o.merge(group_b, on="feature", suffixes=("_ord", "_base")).sort_values("feature")
+    merged = parts[DIRECTIONAL][["feature", "token", "shapley"]].rename(columns={"shapley": DIRECTIONAL})
+    for payoff in wanted[1:]:
+      col = parts[payoff][["feature", "shapley"]].rename(columns={"shapley": payoff})
+      merged = merged.merge(col, on="feature")
+    merged = merged.sort_values("feature")
 
-    sd = sign_disagreement(merged["shapley_ord"].values, merged["shapley_base"].values)
-    if np.isnan(sd):
-      continue
+    phi_dir = merged[DIRECTIONAL].values
+    phi_pres = merged[PRESERVATION].values
 
-    if best is None or sd > best["sign_disagreement"] or (sd == best["sign_disagreement"] and sample_id < best["sample_id"]):
-      best = {
-        "sample_id": sample_id,
-        "sign_disagreement": sd,
-        "response_diversity": diversity,
-        "tokens": merged["token_ord"].tolist(),
-        "ordinal_values": merged["shapley_ord"].values,
-        "baseline_values": merged["shapley_base"].values,
-      }
+    phi_sum = float(np.sum(phi_dir))
+    o0 = int(round(phi_sum)) + EMPTY_COALITION_RANK
+    integer_sum = abs(phi_sum - round(phi_sum)) < 1e-6
 
-  print(f"Skipped {n_skipped_degenerate} sample(s) with fewer than {min_response_diversity} distinct responses, and {n_skipped_no_cache} sample(s) with no cached responses found.")
+    median_ratio, n_distinct_ratios = ratio_summary(phi_dir, phi_pres)
 
-  if best is None:
-    raise ValueError(f"No comparable, non-degenerate samples found for {model}/{dataset}/{masker}/{baseline_payoff}. Consider lowering min_response_diversity or checking the response_cache path.")
+    candidates.append({
+      "sample_id": sample_id,
+      "o0": o0,
+      "phi_dir_sum": phi_sum,
+      "integer_sum": integer_sum,
+      "n_tokens": len(merged),
+      "response_diversity": diversity,
+      "sd_dir_pres": sign_disagreement(phi_dir, phi_pres),
+      "median_ratio": median_ratio,
+      "n_distinct_ratios": n_distinct_ratios,
+      "affine_regime": n_distinct_ratios == 1,
+      "tokens": merged["token"].tolist(),
+      "values": {p: merged[p].values for p in wanted},
+    })
 
-  return best
+  return candidates, wanted
+
+
+def pick(candidates, o0_target, prefer_long=True):
+  pool = [c for c in candidates if c["o0"] == o0_target]
+  if not pool:
+    available = sorted({c["o0"] for c in candidates})
+    raise ValueError(f"No sample with o_0 = {o0_target}. Available values: {available}")
+  key = (lambda c: (-c["n_tokens"], c["sample_id"])) if prefer_long \
+      else (lambda c: (c["n_tokens"], c["sample_id"]))
+  return sorted(pool, key=key)[0]
+
+
+def report(selected, payoffs):
+  print()
+  print("=" * 78)
+  print(f"sample_id={selected['sample_id']}  o_0={selected['o0']}  "
+        f"n_tokens={selected['n_tokens']}  "
+        f"response_diversity={selected['response_diversity']}")
+  print("=" * 78)
+  print(" ".join(selected["tokens"]))
+  print()
+
+  if selected["affine_regime"]:
+    print(f"  Affine regime: phi_pres = {selected['median_ratio']:+.4f} * phi_dir for every")
+    print("  token, which holds exactly when o_0 is at either end of the scale.")
+    print(f"  Sign disagreement between the two payoffs: {selected['sd_dir_pres']:.3f}")
+  else:
+    print(f"  Non-affine regime: the ratio phi_pres/phi_dir takes "
+          f"{selected['n_distinct_ratios']} distinct values across tokens, so the two")
+    print("  payoffs are not related by a single constant on this sample.")
+    print(f"  Sign disagreement between the two payoffs: {selected['sd_dir_pres']:.3f}")
+
+  if not selected["integer_sum"]:
+    print(f"  [warn] sum(phi_dir) = {selected['phi_dir_sum']:.6f} is not an integer; "
+          f"o_0 may be misrecovered")
+
+  print()
+  header = f"  {'token':<18}" + "".join(f"{p:>24}" for p in payoffs)
+  print(header)
+  for i, token in enumerate(selected["tokens"]):
+    row = f"  {token:<18}"
+    for p in payoffs:
+      row += f"{selected['values'][p][i]:>+24.3f}"
+    print(row)
+
+
+LABELS = {
+  DIRECTIONAL: "Ordinal Directional",
+  PRESERVATION: "Ordinal Preservation",
+}
 
 
 @click.command()
@@ -85,35 +175,44 @@ def find_best_example(results_csv, model, dataset, masker, baseline_payoff, min_
 @click.option("--model", type=str, default="deepseek")
 @click.option("--dataset", type=str, default="sst-5")
 @click.option("--masker", type=str, default="delete")
-@click.option("--baseline_payoff", type=str, default="tf-idf")
+@click.option("--o0_targets", type=str, default="0")
+@click.option("--baseline_payoff", type=str, default="")
 @click.option("--top_k", type=int, default=10)
-@click.option("--min_response_diversity", type=int, default=3, help="Minimum number of distinct model responses required across a sample's cached coalitions for it to be eligible for selection.")
-@click.option("--n_samples", type=int, default=10, help="Must match the n_samples used when the response_cache files were generated.")
-def main(results_csv, model, dataset, masker, baseline_payoff, top_k, min_response_diversity, n_samples):
-  RESULTS_DIR = "results"
+@click.option("--min_response_diversity", type=int, default=3)
+@click.option("--n_samples", type=int, default=10)
+def main(results_csv, model, dataset, masker, o0_targets, baseline_payoff, top_k, min_response_diversity, n_samples):
   output_dir = os.path.join(RESULTS_DIR, "e5")
   os.makedirs(output_dir, exist_ok=True)
 
-  best = find_best_example(
-    results_csv, model, dataset, masker, baseline_payoff,
-    min_response_diversity=min_response_diversity, n_samples=n_samples,
+  candidates, payoffs = collect_candidates(
+    results_csv, model, dataset, masker, baseline_payoff or None,
+    min_response_diversity, n_samples,
   )
 
-  print(f"Selected sample_id={best['sample_id']} (sign disagreement = {best['sign_disagreement']:.3f}, response diversity = {best['response_diversity']})")
-  print(" ".join(best["tokens"]))
-  print()
-  print("token, ordinal, " + baseline_payoff)
-  for token, o, b in zip(best["tokens"], best["ordinal_values"], best["baseline_values"]):
-    print(f"  {token:15s} {o:+.3f}   {b:+.3f}")
+  distribution = pd.Series([c["o0"] for c in candidates]).value_counts().sort_index()
+  print(f"\no_0 distribution among candidates: {dict(distribution)}")
 
-  ordinal_vis = ShapleyVisualization(best["tokens"], best["ordinal_values"], label="Ordinal")
-  baseline_vis = ShapleyVisualization(best["tokens"], best["baseline_values"], label=baseline_payoff.upper())
+  rows = []
+  for target in [int(t) for t in o0_targets.split(",")]:
+    selected = pick(candidates, target)
+    report(selected, payoffs)
 
-  bar_ordinal_path = os.path.join(output_dir, "case_study_bar_ordinal.pdf")
-  bar_baseline_path = os.path.join(output_dir, f"case_study_bar_{baseline_payoff}.pdf")
+    for payoff in payoffs:
+      vis = ShapleyVisualization(
+        selected["tokens"], selected["values"][payoff],
+        label=LABELS.get(payoff, payoff.upper()),
+      )
+      path = os.path.join(
+        output_dir,
+        f"case_study_o0{target}_sample{selected['sample_id']}_{payoff}.pdf",
+      )
+      vis.plot_bar_chart(path, top_k=top_k)
+      print(f"  wrote {path}")
 
-  ordinal_vis.plot_bar_chart(bar_ordinal_path, top_k=top_k)
-  baseline_vis.plot_bar_chart(bar_baseline_path, top_k=top_k)
+    rows.append({k: v for k, v in selected.items() if k not in ("tokens", "values")})
+    rows[-1]["text"] = " ".join(selected["tokens"])
+
+  pd.DataFrame(rows).to_csv(os.path.join(output_dir, "e5_selected_samples.csv"), index=False)
 
 
 if __name__ == "__main__":
