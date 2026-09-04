@@ -15,24 +15,40 @@ class Payoff(ABC):
   def evaluate(self, baseline_response, coalition_response):
     ...
 
-
-class OrdinalPayoff(Payoff):
+class _OrdinalScaleMixin:
 
   def __init__(self, mapping, fallback_value=None):
     self.mapping = mapping
     self.fallback_value = fallback_value
 
-  def evaluate(self, baseline_response, coalition_response):
-    response = coalition_response.strip()
+    values = list(mapping.values())
+    self._min = min(values)
+    self._max = max(values)
+    self._midpoint = (self._max + self._min) / 2.0
+    self._span = float(self._max - self._min)
 
+  def _rank(self, response):
+    response = response.strip()
     if response not in self.mapping:
       if self.fallback_value is not None:
         return float(self.fallback_value)
-      values = list(self.mapping.values())
-      midpoint = (max(values) + min(values)) / 2.0
-      return float(midpoint)
-
+      return float(self._midpoint)
     return float(self.mapping[response])
+
+
+class OrdinalDirectionalPayoff(_OrdinalScaleMixin, Payoff):
+
+  def evaluate(self, baseline_response, coalition_response):
+    return self._rank(coalition_response)
+
+
+class OrdinalPreservationPayoff(_OrdinalScaleMixin, Payoff):
+
+  def evaluate(self, baseline_response, coalition_response):
+    if self._span == 0.0:
+      return 1.0
+    distance = abs(self._rank(baseline_response) - self._rank(coalition_response))
+    return float(1.0 - distance / self._span)
 
 
 class TFIDFPayoff(Payoff):
@@ -82,11 +98,11 @@ class BM25Payoff(Payoff):
     self._doc_tokens = []
 
   def fit(self, responses):
-    from rank_bm25 import BM25Okapi
+    from rank_bm25 import BM25L
 
     self._texts = list(responses)
     self._doc_tokens = [self._tokenizer(t) for t in self._texts]
-    self.bm25 = BM25Okapi(self._doc_tokens)
+    self.bm25 = BM25L(self._doc_tokens)
     return self
 
   def evaluate(self, baseline_response, coalition_response):
