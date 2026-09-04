@@ -8,9 +8,9 @@ import pandas as pd
 from scipy.stats import spearmanr, wilcoxon
 from tqdm import tqdm
 
-from ordinalshap.model import InstanceModel
-from ordinalshap.splitters import WordSplitter
-from ordinalshap.maskers import DeleteMasker, ReplacementMasker
+from ordinalshap.model import *
+from ordinalshap.splitters import *
+from ordinalshap.maskers import *
 
 RESULTS_DIR = "results"
 CACHE_DIR = "e3_response_cache"
@@ -19,9 +19,14 @@ DEFAULT_RESULTS_CSV = "results/results.csv"
 MODELS = ["deepseek", "gemma", "mistral"]
 DATASETS = ["sst-5", "yelp-20", "yelp-50"]
 
-PAYOFF = "ordinal"
+PAYOFFS = ["ordinal-directional", "ordinal-preservation"]
 MASKERS = ["delete", "replacement"]
 REPLACEMENT_TOKEN = "[REMOVED]"
+
+PAYOFF_TARGET = {
+  "ordinal-directional": "dir",
+  "ordinal-preservation": "pres",
+}
 
 MODEL_NAMES = {
   "deepseek": "deepseek-ai/DeepSeek-V4-Flash-0731",
@@ -77,7 +82,7 @@ YELP_MAPPING = {
 }
 
 DATASET_CONFIGS = {
-  "sst5": {"system_prompt": SST5_SYSTEM_PROMPT, "mapping": SST5_MAPPING},
+  "sst": {"system_prompt": SST5_SYSTEM_PROMPT, "mapping": SST5_MAPPING},
   "yelp": {"system_prompt": YELP_SYSTEM_PROMPT, "mapping": YELP_MAPPING},
 }
 
@@ -128,6 +133,7 @@ async def compute_deltas(wide, dataset_name, model_name):
   config = dataset_config(dataset_name)
   system_prompt = config["system_prompt"]
   mapping = config["mapping"]
+  span = float(max(mapping.values()) - min(mapping.values()))
   model_full_name = MODEL_NAMES[model_name]
 
   data = pd.read_csv(f"data/{dataset_name}.csv")
@@ -143,7 +149,10 @@ async def compute_deltas(wide, dataset_name, model_name):
     requests_per_minute=50,
   )
 
-  delta_columns = {"delete_delta": {}, "replacement_delta": {}}
+  delta_columns = {
+    "delete_delta_dir": {}, "replacement_delta_dir": {},
+    "delete_delta_pres": {}, "replacement_delta_pres": {},
+  }
 
   sample_ids = sorted(wide["sample_id"].unique())
   n_skipped = 0
@@ -183,15 +192,16 @@ async def compute_deltas(wide, dataset_name, model_name):
 
     save_text_cache(cpath, text, text_cache)
 
-    for masker, column in [("delete", "delete_delta"), ("replacement", "replacement_delta")]:
+    for masker in MASKERS:
       for feature in features:
         response = text_cache[texts_by_masker[masker][feature]]
-        delta = full_ordinal - ordinal_value(response, mapping)
-        delta_columns[column][(sample_id, feature)] = delta
+        coalition_ordinal = ordinal_value(response, mapping)
+        delta_columns[f"{masker}_delta_dir"][(sample_id, feature)] = full_ordinal - coalition_ordinal
+        delta_columns[f"{masker}_delta_pres"][(sample_id, feature)] = abs(full_ordinal - coalition_ordinal) / span
 
   wide = wide.copy()
-  wide["delete_delta"] = wide.apply(lambda row: delta_columns["delete_delta"].get((row["sample_id"], row["feature"])), axis=1)
-  wide["replacement_delta"] = wide.apply(lambda row: delta_columns["replacement_delta"].get((row["sample_id"], row["feature"])), axis=1)
+  for column, values in delta_columns.items():
+    wide[column] = wide.apply(lambda row: values.get((row["sample_id"], row["feature"])), axis=1)
   return wide, n_attempted, n_skipped
 
 
@@ -264,32 +274,22 @@ def fidelity_metrics(shap_values, deltas):
   return magnitude, magnitude_unsigned, direction
 
 
-def analyze_fidelity(wide):
+def analyze_fidelity(wide, target):
   rows = []
   for sample_id, group in wide.groupby("sample_id"):
-    delete_shap = group["delete"].values
-    delete_delta = group["delete_delta"].values
-    delete_spearman, delete_spearman_unsigned, delete_sign = fidelity_metrics(delete_shap, delete_delta)
-    rows.append({
-      "sample_id": sample_id,
-      "masker": "delete",
-      "spearman_magnitude": delete_spearman,
-      "spearman_magnitude_unsigned": delete_spearman_unsigned,
-      "sign_agreement": delete_sign,
-      "n_tokens": len(group),
-    })
-
-    replacement_shap = group["replacement"].values
-    replacement_delta = group["replacement_delta"].values
-    replacement_spearman, replacement_spearman_unsigned, replacement_sign = fidelity_metrics(replacement_shap, replacement_delta)
-    rows.append({
-      "sample_id": sample_id,
-      "masker": "replacement",
-      "spearman_magnitude": replacement_spearman,
-      "spearman_magnitude_unsigned": replacement_spearman_unsigned,
-      "sign_agreement": replacement_sign,
-      "n_tokens": len(group),
-    })
+    for masker in MASKERS:
+      shap_values = group[masker].values
+      deltas = group[f"{masker}_delta_{target}"].values
+      magnitude, magnitude_unsigned, sign = fidelity_metrics(shap_values, deltas)
+      rows.append({
+        "sample_id": sample_id,
+        "masker": masker,
+        "target": target,
+        "spearman_magnitude": magnitude,
+        "spearman_magnitude_unsigned": magnitude_unsigned,
+        "sign_agreement": sign,
+        "n_tokens": len(group),
+      })
   return pd.DataFrame(rows)
 
 
@@ -318,14 +318,14 @@ def rank_biserial_effect_size(diff):
   diff = diff[np.isfinite(diff)]
   diff = diff[diff != 0]
   if len(diff) == 0:
-    return np.nan
+    return np.nan, 0
   ranks = pd.Series(np.abs(diff)).rank(method="average").values
   w_pos = ranks[diff > 0].sum()
   w_neg = ranks[diff < 0].sum()
   denominator = w_pos + w_neg
   if denominator == 0:
-    return np.nan
-  return (w_pos - w_neg) / denominator
+    return np.nan, 0
+  return (w_pos - w_neg) / denominator, len(diff)
 
 
 def paired_wilcoxon(per_sample, metric):
@@ -350,6 +350,8 @@ def paired_wilcoxon(per_sample, metric):
       "p_value": np.nan,
       "effect_size": np.nan,
       "n": len(delete),
+      "n_nonzero": 0,
+      "min_attainable_p": np.nan,
     }
 
   diff = delete.values - replacement.values
@@ -359,7 +361,7 @@ def paired_wilcoxon(per_sample, metric):
     statistic = np.nan
     p_value = np.nan
 
-  effect = rank_biserial_effect_size(diff)
+  effect, n_nonzero = rank_biserial_effect_size(diff)
   return {
     "metric": metric,
     "masker_a": "delete",
@@ -372,27 +374,31 @@ def paired_wilcoxon(per_sample, metric):
     "p_value": p_value,
     "effect_size": effect,
     "n": len(delete),
+    "n_nonzero": n_nonzero,
+    "min_attainable_p": 2.0 / (2 ** n_nonzero) if 0 < n_nonzero < 60 else 0.0,
   }
 
 
-def run_statistical_tests(per_sample, model_name, dataset_name):
+def run_statistical_tests(per_sample, model_name, dataset_name, payoff):
   metrics = ["spearman_magnitude", "sign_agreement"]
   rows = [paired_wilcoxon(per_sample, metric) for metric in metrics]
   result = pd.DataFrame(rows)
   result["model"] = model_name
   result["dataset"] = dataset_name
+  result["payoff"] = payoff
+  result["target"] = PAYOFF_TARGET[payoff]
   return result
 
 
-def load_results(results_csv, dataset, model):
+def load_results(results_csv, dataset, model, payoff):
   if not os.path.exists(results_csv):
     raise FileNotFoundError(f"Could not find results file:\n{results_csv}")
 
   df = pd.read_csv(results_csv)
-  subset = df[(df["dataset"] == dataset) & (df["model"] == model) & (df["payoff"] == PAYOFF)].copy()
+  subset = df[(df["dataset"] == dataset) & (df["model"] == model) & (df["payoff"] == payoff)].copy()
 
   if subset.empty:
-    raise ValueError(f"No rows found for dataset={dataset!r}, model={model!r}, payoff={PAYOFF!r}.")
+    raise ValueError(f"No rows found for dataset={dataset!r}, model={model!r}, payoff={payoff!r}.")
 
   maskers_found = sorted(subset["masker"].dropna().unique())
   expected = sorted(MASKERS)
@@ -410,7 +416,7 @@ def load_results(results_csv, dataset, model):
   return wide
 
 
-def print_summary(agreement_summary, fidelity_summary, statistical_tests):
+def print_summary(agreement_summary, fidelity_summary, statistical_tests, target):
   print()
   print("=" * 80)
   print("E4 MASKER AGREEMENT (mean/std + coverage)")
@@ -419,7 +425,10 @@ def print_summary(agreement_summary, fidelity_summary, statistical_tests):
 
   print()
   print("=" * 80)
-  print("E4 FIDELITY (mean/std + coverage)")
+  print(f"E4 FIDELITY ON THE {'DIRECTIONAL' if target == 'dir' else 'PRESERVATION'} TARGET")
+  if target == "pres":
+    print("  Sign agreement saturates here: the observed effect is non-negative")
+    print("  by definition, so a uniformly positive attribution attains 1.0.")
   print("=" * 80)
   print(fidelity_summary.to_string(index=False))
 
@@ -430,8 +439,9 @@ def print_summary(agreement_summary, fidelity_summary, statistical_tests):
   print(statistical_tests.to_string(index=False))
 
 
-async def run(model, dataset, results_csv, output_dir):
-  wide = load_results(results_csv, dataset, model)
+async def run(model, dataset, payoff, results_csv, output_dir):
+  target = PAYOFF_TARGET[payoff]
+  wide = load_results(results_csv, dataset, model, payoff)
   wide, n_attempted, n_skipped = await compute_deltas(wide, dataset, model)
   print(f"Samples skipped (feature/token count mismatch): {n_skipped} / {n_attempted + n_skipped}")
 
@@ -440,25 +450,27 @@ async def run(model, dataset, results_csv, output_dir):
   agreement_summary = summarize_agreement(agreement, n_attempted)
   agreement_summary.to_csv(os.path.join(output_dir, "e4_masker_agreement_summary.csv"), index=False)
 
-  fidelity = analyze_fidelity(wide)
+  fidelity = analyze_fidelity(wide, target)
   fidelity.to_csv(os.path.join(output_dir, "e4_fidelity_per_sample.csv"), index=False)
   fidelity_summary = summarize_fidelity(fidelity, n_attempted)
+  fidelity_summary["target"] = target
   fidelity_summary.to_csv(os.path.join(output_dir, "e4_fidelity_summary.csv"), index=False)
 
-  statistical_tests = run_statistical_tests(fidelity, model, dataset)
+  statistical_tests = run_statistical_tests(fidelity, model, dataset, payoff)
   statistical_tests.to_csv(os.path.join(output_dir, "e4_wilcoxon_raw.csv"), index=False)
 
-  print_summary(agreement_summary, fidelity_summary, statistical_tests)
+  print_summary(agreement_summary, fidelity_summary, statistical_tests, target)
 
 
 @click.command()
 @click.option("--model_name", type=click.Choice(MODELS), required=True)
 @click.option("--dataset_name", type=click.Choice(DATASETS), required=True)
+@click.option("--payoff_name", type=click.Choice(PAYOFFS), required=True)
 @click.option("--results_csv", type=str, default=DEFAULT_RESULTS_CSV, show_default=True)
-def main(model_name, dataset_name, results_csv):
-  output_dir = os.path.join(RESULTS_DIR, "e4", f"{dataset_name}_{model_name}")
+def main(model_name, dataset_name, payoff_name, results_csv):
+  output_dir = os.path.join(RESULTS_DIR, "e4", f"{dataset_name}_{model_name}_{payoff_name}")
   os.makedirs(output_dir, exist_ok=True)
-  asyncio.run(run(model_name, dataset_name, results_csv, output_dir))
+  asyncio.run(run(model_name, dataset_name, payoff_name, results_csv, output_dir))
 
 
 if __name__ == "__main__":
