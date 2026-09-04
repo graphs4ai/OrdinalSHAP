@@ -19,8 +19,6 @@ OrdinalSHAP provides two payoff functions. They answer different questions about
 
 The directional payoff is the one to use when you want to know what drove the prediction toward a given label. The preservation payoff answers the same question as TF-IDF, BM25 and embedding-based payoffs, and is the drop-in replacement for them on ordinal tasks: it measures distance in rank steps rather than in text space, so it cannot assign a higher similarity to a more distant label pair.
 
-The two are related. When the full-input prediction sits at either end of the scale, `phi_pres = ∓phi_dir / (K-1)` exactly, so every sign is opposite (at the bottom) or identical (at the top). Elsewhere the relation is not affine and the two carry different information.
-
 ---
 
 ## Repository Structure
